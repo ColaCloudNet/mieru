@@ -43,6 +43,12 @@ const (
 	minUnderlayCapacityReclaim = 16
 )
 
+// ServerUnderlayIdleTimeout is how long a server underlay may stay open after
+// its last session is removed before Mux closes the underlying TCP/UDP.
+// If zero, scheduleIdleTime is used (same order of magnitude as client reclaim).
+// Tests may set a smaller value to verify reclaim without waiting minutes.
+var ServerUnderlayIdleTimeout time.Duration
+
 // Mux manages the sessions and underlays.
 type Mux struct {
 	// ---- common fields ----
@@ -781,7 +787,23 @@ func (m *Mux) cleanUnderlay(alsoDisableIdleOrOverloadUnderlay bool) {
 		case <-underlay.Done():
 		default:
 			// Close idle underlay.
-			if underlay.SessionCount() == 0 && underlay.Scheduler().Idle() {
+			// Client path: ScheduleController.Idle() after TryDisableIdle.
+			// Server path: SessionIdleSince tracks true session-empty time
+			// (scheduler Idle() never becomes true on server; see enfein/mieru#317).
+			shouldClose := underlay.SessionCount() == 0 && underlay.Scheduler().Idle()
+			if !shouldClose && !m.isClient {
+				underlay.MarkServerIdleIfNoLiveSessions()
+				if idleSince := underlay.SessionIdleSince(); !idleSince.IsZero() {
+					timeout := ServerUnderlayIdleTimeout
+					if timeout <= 0 {
+						timeout = scheduleIdleTime
+					}
+					if time.Since(idleSince) > timeout {
+						shouldClose = true
+					}
+				}
+			}
+			if shouldClose {
 				underlay.Close()
 				close++
 			} else {

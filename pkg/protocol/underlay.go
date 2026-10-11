@@ -18,6 +18,7 @@ package protocol
 import (
 	"context"
 	"net"
+	"time"
 
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/enfein/mieru/v3/pkg/common"
@@ -68,6 +69,13 @@ type Underlay interface {
 
 	// Returns the number of sessions.
 	SessionCount() int
+
+	// SessionIdleSince returns when the underlay became session-empty.
+	// Zero means not idle for server-side reclaim.
+	SessionIdleSince() time.Time
+
+	// MarkServerIdleIfNoLiveSessions updates idle-since when no live sessions remain.
+	MarkServerIdleIfNoLiveSessions()
 
 	// Returns detailed information of all the sessions.
 	SessionInfos() []*appctlpb.SessionInfo
