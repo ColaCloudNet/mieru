@@ -59,6 +59,11 @@ type baseUnderlay struct {
 	inBytes  atomic.Int64
 	outBytes atomic.Int64
 
+	// sessionIdleSinceUnixMicro is set when the last session is removed on a
+	// server underlay. 0 means the underlay is not idle for reclaim purposes
+	// (still has sessions, or never transitioned from active to empty).
+	sessionIdleSinceUnixMicro atomic.Int64
+
 	// ---- client fields ----
 	scheduler *ScheduleController
 }
@@ -149,6 +154,7 @@ func (b *baseUnderlay) AddSession(s *Session, remoteAddr net.Addr) error {
 	}
 	s.conn = b
 	s.remoteAddr = remoteAddr
+	b.sessionIdleSinceUnixMicro.Store(0)
 
 	if s.isClient {
 		metrics.ActiveOpens.Add(1)
@@ -172,10 +178,63 @@ func (b *baseUnderlay) RemoveSession(s *Session) error {
 	}
 
 	b.sessionMap.Delete(s.id)
+	if b.SessionCount() == 0 && !b.isClient {
+		b.sessionIdleSinceUnixMicro.Store(time.Now().UnixMicro())
+	}
 	s.Close()
 	s.wg.Wait()
 	return nil
 }
+
+// SessionIdleSince returns when this underlay last became session-empty.
+// A zero time means it is not eligible for server-side idle reclaim.
+func (b *baseUnderlay) SessionIdleSince() time.Time {
+	micros := b.sessionIdleSinceUnixMicro.Load()
+	if micros == 0 {
+		return time.Time{}
+	}
+	return time.UnixMicro(micros)
+}
+
+// liveSessionCount returns sessions that have not been closed yet.
+func (b *baseUnderlay) liveSessionCount() int {
+	n := 0
+	b.sessionMap.Range(func(k, v any) bool {
+		s := v.(*Session)
+		select {
+		case <-s.closedChan:
+		default:
+			n++
+		}
+		return true
+	})
+	return n
+}
+
+// markServerIdleIfNoLiveSessions sets SessionIdleSince when every session on a
+// server underlay is closed (or the map is empty after having had sessions).
+// Never-used underlays (no map entries, idle unset) stay unmarked.
+func (b *baseUnderlay) MarkServerIdleIfNoLiveSessions() {
+	if b.isClient {
+		return
+	}
+	if b.liveSessionCount() > 0 {
+		b.sessionIdleSinceUnixMicro.Store(0)
+		return
+	}
+	hasAny := false
+	b.sessionMap.Range(func(k, v any) bool {
+		hasAny = true
+		return false
+	})
+	if !hasAny && b.sessionIdleSinceUnixMicro.Load() == 0 {
+		return
+	}
+	if b.sessionIdleSinceUnixMicro.Load() == 0 {
+		b.sessionIdleSinceUnixMicro.Store(time.Now().UnixMicro())
+	}
+}
+
 
 func (b *baseUnderlay) SessionCount() int {
 	n := 0

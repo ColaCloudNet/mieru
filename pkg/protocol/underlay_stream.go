@@ -221,7 +221,9 @@ func (t *StreamUnderlay) RunEventLoop(ctx context.Context) error {
 			}
 			return fmt.Errorf("readOneSegment() failed: %w", err)
 		} else if seg == nil {
-			// Timeout reading the segment, will try again later.
+			// Timeout reading the segment; still run session GC (ticker may
+			// have been skipped while blocked in Read).
+			t.cleanSessions()
 			continue
 		}
 		if log.IsLevelEnabled(log.TraceLevel) {
@@ -247,6 +249,7 @@ func (t *StreamUnderlay) RunEventLoop(ctx context.Context) error {
 				if err := t.onCloseSession(seg); err != nil {
 					return fmt.Errorf("onCloseSession() failed: %w", err)
 				}
+				t.cleanSessions()
 			default:
 				return fmt.Errorf("protocol %d is a session protocol but not recognized by stream underlay", seg.metadata.Protocol())
 			}
